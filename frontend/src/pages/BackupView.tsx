@@ -271,7 +271,11 @@ export default function BackupView() {
                           <TableCell>{yard?.name ?? '未知站场'}</TableCell>
                           <TableCell>{row.switchCode || '站场级'}</TableCell>
                           <TableCell>
-                            <Chip size="small" color={row.limitKmh <= 25 ? 'error' : 'warning'} label={`${row.limitKmh} km/h`} />
+                            <Chip
+                              size="small"
+                              color={row.limitKmh <= 0 ? 'error' : row.limitKmh <= 25 ? 'error' : 'warning'}
+                              label={row.limitKmh <= 0 ? '封锁' : `${row.limitKmh} km/h`}
+                            />
                           </TableCell>
                           <TableCell>{row.period}</TableCell>
                           <TableCell>{row.reason}</TableCell>
@@ -398,7 +402,8 @@ export default function BackupView() {
               fullWidth
               size="small"
               type="number"
-              label="限速值（km/h）"
+              label="限速值（km/h，0 表示封锁）"
+              inputProps={{ min: 0 }}
               value={restrictionDialog.form.limitKmh}
               onChange={(event) =>
                 setRestrictionDialog((prev) => ({ ...prev, form: { ...prev.form, limitKmh: Number(event.target.value) } }))

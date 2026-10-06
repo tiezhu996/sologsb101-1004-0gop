@@ -332,6 +332,16 @@ async function seedDatabase(): Promise<void> {
       createdAt: stamp,
       revision: ROW_REVISION,
     },
+    {
+      id: 'restrict-3',
+      yardId: 'yard-1',
+      switchCode: '11#',
+      limitKmh: 0,
+      period: `${shiftDate(3)} ~ ${shiftDate(6)}`,
+      reason: '辙叉心更换施工，道岔封锁（限速 0 按封锁处理）',
+      createdAt: stamp,
+      revision: ROW_REVISION,
+    },
   );
 
   await db.transaction(

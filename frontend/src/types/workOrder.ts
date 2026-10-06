@@ -70,6 +70,12 @@ export interface WorkOrderView extends WorkOrder {
   machineConflict: boolean;
   /** 关联病害中仍未销号的数量 */
   pendingFaultCount: number;
+  /** 命中时间窗的慢行 / 封锁条件数（仅待编排单校验，已下达与完成单不回头校验） */
+  restrictionCount: number;
+  /** 整单执行限速：命中条件中最低限速 km/h，无命中为 null */
+  effectiveLimitKmh: number | null;
+  /** 是否命中封锁条件（限速 0 且时间窗相交） */
+  blockedByRestriction: boolean;
 }
 
 /** 常用机具字典 */

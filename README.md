@@ -27,6 +27,7 @@ docker compose up -d --build # 代码改动后重建
 - 按巡检批次录入病害并定位到部件（尖轨 / 基本轨 / 辙叉 / 转辙机）
 - 评定病害等级（轻 / 中 / 重）、批量调整、批量升级、手工销号与撤销
 - 勾选待修病害编排天窗作业单，分配时间窗 / 负责人 / 作业人员 / 机具，并做**时间窗 + 人员 + 机具三重冲突校验**
+- 编排时顺着关联病害 → 道岔 → 站场列出命中时间窗的慢行 / 封锁条件，**整单按最低限速统一备料具**；限速 0 视为封锁，时间窗相交即拦截保存（已下达 / 完成的单不回头校验）
 - 按天窗批次推进状态（待编排 → 已下达 → 作业中 → 已完成），推进到已完成时**自动回写病害销号**
 - 登记慢行 / 封锁条件，查看结构版本并导出 / 导入整库 JSON
 
@@ -52,7 +53,7 @@ docker compose up -d --build # 代码改动后重建
 | `/yards` | 站场与道岔台账 | 建立站场与道岔，按辙叉号与轨型筛选 |
 | `/inspections` | 巡检与病害录入 | 按巡检批次录入病害并定位到部件 |
 | `/faults` | 病害评定与销号 | 评定等级、批量调整、手工销号与撤销 |
-| `/workorders` | 天窗作业单编排 | 勾选病害成单、分配时间窗与人员机具并校验冲突 |
+| `/workorders` | 天窗作业单编排 | 勾选病害成单、分配时间窗与人员机具并校验冲突，联动慢行 / 封锁条件 |
 | `/progress` | 作业进度与销号回写 | 更新状态，完成项自动回写病害销号 |
 | `/backup` | 封锁条件与版本 | 登记慢行 / 封锁条件，结构版本与 JSON 管理 |
 
@@ -87,7 +88,7 @@ sologsb101-1004/
         ├── pages/               # YardList.tsx InspectionEntry.tsx FaultBoard.tsx WorkOrderPlan.tsx ProgressView.tsx BackupView.tsx
         ├── router/index.tsx     # 路由表（懒加载页面 + App 布局）
         ├── router/routes.ts     # 叶子模块：仅路径常量，切断 App ⇄ router 循环依赖
-        └── utils/               # severity.ts window.ts db.ts export.ts events.ts format.ts
+        └── utils/               # severity.ts window.ts restriction.ts db.ts export.ts events.ts format.ts
 ```
 
 ## 六、数据存储说明
@@ -106,7 +107,7 @@ sologsb101-1004/
   | `restrictions` | 封锁 / 慢行条件 | id / yardId / switchCode |
   | `settings` | 自定义字典 | id |
 
-- **首屏自动播种**：`initDatabase()` 在 `yards` 表为空时写入演示数据（幂等）——2 个站场 × 各 4 组道岔 × 1~2 次巡检 × 每次 0~3 条病害 + 3 张天窗作业单（含 1 张刻意与人员时间窗冲突）+ 2 条封锁条件，父子记录通过 `yardId / switchId / inspectionId / faultIds` 互相引用。
+- **首屏自动播种**：`initDatabase()` 在 `yards` 表为空时写入演示数据（幂等）——2 个站场 × 各 4 组道岔 × 1~2 次巡检 × 每次 0~3 条病害 + 3 张天窗作业单（含 1 张刻意与人员时间窗冲突）+ 3 条慢行 / 封锁条件（含 1 条限速 0 的封锁），父子记录通过 `yardId / switchId / inspectionId / faultIds` 互相引用。
 - **跨页状态**：全部放在 Redux Toolkit store（`yardStore / switchStore / faultStore / workOrderStore`），页面只读 store；Dexie 写入后由 `utils/events.ts` 广播，store 自动重新拉取。
 - **数据不出浏览器**：容器无状态，不挂载卷、不使用数据库服务。
 

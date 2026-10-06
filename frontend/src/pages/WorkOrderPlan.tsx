@@ -36,6 +36,7 @@ import {
   Typography,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
+import BlockIcon from '@mui/icons-material/Block';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
@@ -61,6 +62,12 @@ import {
 import { FAULT_SEVERITY_LABEL, type FaultSeverity } from '../types/fault';
 import { ROUTES } from '../router/routes';
 import { endTimeOf, findMachineConflicts, findMemberConflicts, formatDuration, nowDateTime, windowMinutes } from '../utils/window';
+import {
+  blockedHits,
+  describeHit,
+  effectiveOrderLimit,
+  findOrderRestrictionHits,
+} from '../utils/restriction';
 import { share } from '../utils/format';
 import { SEVERITY_HEX } from '../utils/severity';
 import StatBadge from '../components/common/StatBadge';
@@ -97,6 +104,11 @@ export default function WorkOrderPlan() {
   const planable = useAppSelector(selectPlanableFaults);
   const stats = useAppSelector(selectWindowStats);
   const allOrderRows = useAppSelector((state) => state.workOrder.workOrders);
+  const faultRows = useAppSelector((state) => state.workOrder.faults);
+  const inspectionRows = useAppSelector((state) => state.workOrder.inspections);
+  const switchRows = useAppSelector((state) => state.workOrder.switches);
+  const yardRows = useAppSelector((state) => state.workOrder.yards);
+  const restrictionRows = useAppSelector((state) => state.workOrder.restrictions);
 
   const [toast, setToast] = useState('');
   const [selectedFaults, setSelectedFaults] = useState<string[]>([]);
@@ -144,6 +156,33 @@ export default function WorkOrderPlan() {
     };
   }, [allOrderRows, dialog]);
 
+  /**
+   * 当前表单命中的慢行 / 封锁条件（顺着关联病害 → 道岔 → 站场读过去）。
+   * 已下达 / 作业中 / 已完成的单不再回头校验，返回 null。
+   */
+  const draftRestrictionHits = useMemo(() => {
+    if (dialog.editingId) {
+      const editing = allOrderRows.find((item) => item.id === dialog.editingId);
+      if (editing && editing.state !== 'planned') return null;
+    }
+    return findOrderRestrictionHits(
+      {
+        faultIds: dialog.form.faultIds,
+        windowStart: dialog.form.windowStart,
+        windowEnd: dialog.form.windowEnd,
+      },
+      {
+        faults: faultRows,
+        inspections: inspectionRows,
+        switches: switchRows,
+        yards: yardRows,
+        restrictions: restrictionRows,
+      },
+    );
+  }, [allOrderRows, dialog, faultRows, inspectionRows, switchRows, yardRows, restrictionRows]);
+
+  const draftBlocked = draftRestrictionHits !== null && blockedHits(draftRestrictionHits).length > 0;
+
   const openCreate = (): void => {
     const next = defaultForm();
     next.faultIds = selectedFaults;
@@ -179,9 +218,20 @@ export default function WorkOrderPlan() {
       setToast('天窗止必须晚于天窗起');
       return;
     }
+    if (draftBlocked) {
+      setToast('时间窗与封锁条件相交，不能保存');
+      return;
+    }
+    const errorText = (error: unknown): string =>
+      typeof error === 'string' ? error : error instanceof Error ? error.message : '未知错误';
     if (dialog.editingId) {
-      await dispatch(updateWorkOrder({ id: dialog.editingId, draft: dialog.form }));
-      setToast('作业单已更新');
+      try {
+        await dispatch(updateWorkOrder({ id: dialog.editingId, draft: dialog.form })).unwrap();
+        setToast('作业单已更新');
+      } catch (error) {
+        setToast(`保存失败：${errorText(error)}`);
+        return;
+      }
     } else {
       try {
         const result = await dispatch(createWorkOrder(dialog.form)).unwrap();
@@ -191,7 +241,7 @@ export default function WorkOrderPlan() {
             : '作业单已创建',
         );
       } catch (error) {
-        setToast(`建单失败：${error instanceof Error ? error.message : '未知错误'}`);
+        setToast(`建单失败：${errorText(error)}`);
         return;
       }
       dispatch(clearFaultSelection());
@@ -368,6 +418,15 @@ export default function WorkOrderPlan() {
                         ) : null}
                         {order.memberConflict ? <Chip size="small" color="warning" label="人员占用冲突" /> : null}
                         {order.machineConflict ? <Chip size="small" color="warning" label="机具占用冲突" /> : null}
+                        {order.blockedByRestriction ? (
+                          <Tooltip title="天窗时间窗与封锁时段相交，请调整时间窗">
+                            <Chip size="small" color="error" icon={<BlockIcon />} label="命中封锁" />
+                          </Tooltip>
+                        ) : order.effectiveLimitKmh !== null ? (
+                          <Tooltip title={`命中 ${order.restrictionCount} 条慢行条件，整单按最低限速备料具`}>
+                            <Chip size="small" color="warning" label={`限速 ${order.effectiveLimitKmh} km/h`} />
+                          </Tooltip>
+                        ) : null}
                       </Stack>
                       <Stack direction="row" spacing={0.5}>
                         <Button size="small" startIcon={<EditIcon />} onClick={() => openEdit(order)}>
@@ -590,6 +649,35 @@ export default function WorkOrderPlan() {
             </Grid>
 
             <Grid item xs={12}>
+              {draftRestrictionHits === null ? (
+                <Alert severity="info">该单已下达或已完成，不再回头校验慢行 / 封锁条件。</Alert>
+              ) : draftRestrictionHits.length === 0 ? (
+                <Alert severity="success">慢行 / 封锁预检：当前时间窗未命中任何限速或封锁条件。</Alert>
+              ) : (
+                <Alert severity={draftBlocked ? 'error' : 'warning'}>
+                  <Typography variant="body2" fontWeight={600} gutterBottom>
+                    慢行 / 封锁预检：命中 {draftRestrictionHits.length} 条条件，整单按最低限速{' '}
+                    {effectiveOrderLimit(draftRestrictionHits)} km/h 统一备料具
+                  </Typography>
+                  <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+                    {draftRestrictionHits.map((hit) => (
+                      <li key={hit.restrictionId}>
+                        <Typography variant="body2" color={hit.blocked ? 'error' : 'textPrimary'}>
+                          {describeHit(hit)}（涉及道岔：{hit.hitSwitchCodes.join('、')}）
+                        </Typography>
+                      </li>
+                    ))}
+                  </Box>
+                  {draftBlocked ? (
+                    <Typography variant="body2" color="error" fontWeight={600} mt={0.5}>
+                      限速 0 为封锁：时间窗与封锁时段相交，不能保存，请调整天窗时间窗。
+                    </Typography>
+                  ) : null}
+                </Alert>
+              )}
+            </Grid>
+
+            <Grid item xs={12}>
               <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
                 <Button
                   size="small"
@@ -627,7 +715,7 @@ export default function WorkOrderPlan() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setDialog((prev) => ({ ...prev, open: false }))}>取消</Button>
-          <Button variant="contained" onClick={() => void submit()}>
+          <Button variant="contained" disabled={draftBlocked} onClick={() => void submit()}>
             保存
           </Button>
         </DialogActions>

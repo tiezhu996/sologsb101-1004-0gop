@@ -7,6 +7,7 @@ import {
   ROW_REVISION,
   listFaults,
   listInspections,
+  listRestrictions,
   listSwitches,
   listWorkOrders,
   listYards,
@@ -15,6 +16,7 @@ import {
   removeWorkOrder,
   type FaultRow,
   type InspectionRow,
+  type SpeedRestrictionRow,
   type SwitchRow,
   type WorkOrderRow,
   type YardRow,
@@ -33,6 +35,14 @@ import {
   nowDateTime,
   windowMinutes,
 } from '../utils/window';
+import {
+  blockedHits,
+  describeHit,
+  effectiveOrderLimit,
+  findOrderRestrictionHits,
+  type OrderRestrictionData,
+  type OrderRestrictionInput,
+} from '../utils/restriction';
 import { emitChange } from '../utils/events';
 
 export interface WorkOrderStateSlice {
@@ -41,6 +51,7 @@ export interface WorkOrderStateSlice {
   inspections: InspectionRow[];
   switches: SwitchRow[];
   yards: YardRow[];
+  restrictions: SpeedRestrictionRow[];
   /** 编排时勾选的病害 */
   selectedFaultIds: string[];
   loading: boolean;
@@ -53,6 +64,7 @@ const initialState: WorkOrderStateSlice = {
   inspections: [],
   switches: [],
   yards: [],
+  restrictions: [],
   selectedFaultIds: [],
   loading: false,
   error: '',
@@ -65,23 +77,38 @@ export const loadWorkOrderData = createAsyncThunk<
     inspections: InspectionRow[];
     switches: SwitchRow[];
     yards: YardRow[];
+    restrictions: SpeedRestrictionRow[];
   },
   void,
   { rejectValue: string }
 >('workOrder/load', async (_arg, { rejectWithValue }) => {
   try {
-    const [workOrders, faults, inspections, switches, yards] = await Promise.all([
+    const [workOrders, faults, inspections, switches, yards, restrictions] = await Promise.all([
       listWorkOrders(),
       listFaults(),
       listInspections(),
       listSwitches(),
       listYards(),
+      listRestrictions(),
     ]);
-    return { workOrders, faults, inspections, switches, yards };
+    return { workOrders, faults, inspections, switches, yards, restrictions };
   } catch (error) {
     return rejectWithValue(error instanceof Error ? error.message : '作业单读取失败');
   }
 });
+
+/**
+ * 封锁校验：限速 0 的条件与天窗时间窗相交时拦截保存，并指出是哪条条件。
+ * 仅对待编排（planned）单校验；已下达 / 作业中 / 已完成的单不再回头校验。
+ */
+function assertNotBlocked(
+  input: OrderRestrictionInput,
+  data: OrderRestrictionData,
+): string | null {
+  const blocked = blockedHits(findOrderRestrictionHits(input, data));
+  if (blocked.length === 0) return null;
+  return `时间窗与封锁条件相交，不能保存：${blocked.map(describeHit).join('；')}`;
+}
 
 /** 新建作业单：把勾选病害编排进同一时间窗，并回传时间窗冲突编号 */
 export const createWorkOrder = createAsyncThunk<
@@ -91,6 +118,12 @@ export const createWorkOrder = createAsyncThunk<
 >('workOrder/create', async (draft, { getState, rejectWithValue }) => {
   try {
     const state = getState().workOrder;
+    const blockedMessage = assertNotBlocked(
+      { faultIds: draft.faultIds, windowStart: draft.windowStart, windowEnd: draft.windowEnd },
+      state,
+    );
+    if (blockedMessage) return rejectWithValue(blockedMessage);
+
     const conflicts = findConflicts(
       { id: 'pending', windowStart: draft.windowStart, windowEnd: draft.windowEnd },
       state.workOrders.map((item) => ({
@@ -131,6 +164,14 @@ export const updateWorkOrder = createAsyncThunk<
     const state = getState().workOrder;
     const existing = state.workOrders.find((item) => item.id === id);
     if (!existing) return;
+    // 已下达 / 作业中 / 已完成的单不再回头校验封锁条件
+    if (existing.state === 'planned') {
+      const blockedMessage = assertNotBlocked(
+        { faultIds: draft.faultIds, windowStart: draft.windowStart, windowEnd: draft.windowEnd },
+        state,
+      );
+      if (blockedMessage) return rejectWithValue(blockedMessage);
+    }
     await putWorkOrder({
       ...existing,
       code: draft.code.trim(),
@@ -230,6 +271,7 @@ const workOrderSlice = createSlice({
         state.inspections = action.payload.inspections;
         state.switches = action.payload.switches;
         state.yards = action.payload.yards;
+        state.restrictions = action.payload.restrictions;
         const validIds = new Set(action.payload.faults.map((item) => item.id));
         state.selectedFaultIds = state.selectedFaultIds.filter((id) => validIds.has(id));
       })
@@ -249,7 +291,7 @@ interface RootLike {
 
 /** 作业单视图：带病害标签、时长、冲突与未销号数量 */
 export function selectWorkOrderViews(state: RootLike): WorkOrderView[] {
-  const { workOrders, faults, inspections, switches, yards } = state.workOrder;
+  const { workOrders, faults, inspections, switches, yards, restrictions } = state.workOrder;
   const switchIdOfFault = (fault: FaultRow): string | undefined => {
     const inspection = inspections.find((row) => row.id === fault.inspectionId);
     return inspection?.switchId;
@@ -293,6 +335,14 @@ export function selectWorkOrderViews(state: RootLike): WorkOrderView[] {
           machines: item.machines,
         })),
       );
+      // 慢行 / 封锁条件命中：仅待编排单校验，已下达与完成的单不回头校验
+      const restrictionHits =
+        order.state === 'planned'
+          ? findOrderRestrictionHits(
+              { faultIds: order.faultIds, windowStart: order.windowStart, windowEnd: order.windowEnd },
+              { faults, inspections, switches, yards, restrictions },
+            )
+          : [];
       return {
         ...order,
         faultLabels: labels,
@@ -303,6 +353,9 @@ export function selectWorkOrderViews(state: RootLike): WorkOrderView[] {
         memberConflict: memberConflicts.length > 0,
         machineConflict: machineConflicts.length > 0,
         pendingFaultCount: related.filter((item) => item.state === 'pending').length,
+        restrictionCount: restrictionHits.length,
+        effectiveLimitKmh: effectiveOrderLimit(restrictionHits),
+        blockedByRestriction: restrictionHits.some((item) => item.blocked),
       };
     })
     .sort((a, b) => a.windowStart.localeCompare(b.windowStart));
