@@ -1,4 +1,5 @@
 import type { Revisioned } from './persistence';
+import type { RestrictionHit } from './restriction';
 
 /** 天窗作业单状态 */
 export type WorkOrderState = 'planned' | 'issued' | 'working' | 'done';
@@ -70,6 +71,12 @@ export interface WorkOrderView extends WorkOrder {
   machineConflict: boolean;
   /** 关联病害中仍未销号的数量 */
   pendingFaultCount: number;
+  /** 命中时间窗的限速 / 封锁条件（仅待编排单计算，已下达与已完成不再回头校验） */
+  restrictionHits: RestrictionHit[];
+  /** 整单备料限速：命中条件中的最低限速（多处道岔限速不同取最严一条），无命中为 null */
+  lowestLimitKmh: number | null;
+  /** 命中的封锁条件（限速 ≤ 0），非空则挡住保存 */
+  restrictionBlockers: RestrictionHit[];
 }
 
 /** 常用机具字典 */

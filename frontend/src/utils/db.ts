@@ -11,6 +11,7 @@ import type { Switch } from '../types/switch';
 import type { Inspection } from '../types/inspection';
 import type { Fault } from '../types/fault';
 import type { WorkOrder } from '../types/workOrder';
+import type { SpeedRestriction } from '../types/restriction';
 import { ROW_REVISION, type Revisioned } from '../types/persistence';
 import { nowDateTime, shiftDate, todayDate, windowMinutes } from './window';
 import { nowIso, uuid } from './format';
@@ -22,23 +23,7 @@ export const DB_NAME = 'gbrailswitch';
 export const DB_SCHEMA_VERSION = 2;
 
 export { ROW_REVISION };
-export type { Revisioned };
-
-/** 封锁 / 慢行条件登记（/backup 页） */
-export interface SpeedRestriction extends Revisioned {
-  id: string;
-  /** 关联站场 */
-  yardId: string;
-  /** 关联道岔（可空，表示站场级） */
-  switchCode: string;
-  /** 限速值 km/h */
-  limitKmh: number;
-  /** 起止时间描述 */
-  period: string;
-  /** 登记原因 */
-  reason: string;
-  createdAt: string;
-}
+export type { Revisioned, SpeedRestriction };
 
 export type YardRow = Yard;
 export type SwitchRow = Switch;
@@ -329,6 +314,16 @@ async function seedDatabase(): Promise<void> {
       limitKmh: 45,
       period: `${shiftDate(1)} ~ ${shiftDate(1)}`,
       reason: '交分道岔打磨作业，天窗内限速',
+      createdAt: stamp,
+      revision: ROW_REVISION,
+    },
+    {
+      id: 'restrict-3',
+      yardId: 'yard-1',
+      switchCode: '',
+      limitKmh: 0,
+      period: `${shiftDate(2)} ~ ${shiftDate(3)}`,
+      reason: '线路大机捣固施工，全站封锁',
       createdAt: stamp,
       revision: ROW_REVISION,
     },

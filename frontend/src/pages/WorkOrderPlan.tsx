@@ -36,8 +36,10 @@ import {
   Typography,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
+import BlockIcon from '@mui/icons-material/Block';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
+import SpeedIcon from '@mui/icons-material/Speed';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import { useAppDispatch, useAppSelector } from '../hooks/useAppStore';
 import {
@@ -61,6 +63,7 @@ import {
 import { FAULT_SEVERITY_LABEL, type FaultSeverity } from '../types/fault';
 import { ROUTES } from '../router/routes';
 import { endTimeOf, findMachineConflicts, findMemberConflicts, formatDuration, nowDateTime, windowMinutes } from '../utils/window';
+import { describeRestrictionHit, summarizeOrderRestrictions } from '../utils/restriction';
 import { share } from '../utils/format';
 import { SEVERITY_HEX } from '../utils/severity';
 import StatBadge from '../components/common/StatBadge';
@@ -97,6 +100,11 @@ export default function WorkOrderPlan() {
   const planable = useAppSelector(selectPlanableFaults);
   const stats = useAppSelector(selectWindowStats);
   const allOrderRows = useAppSelector((state) => state.workOrder.workOrders);
+  const allFaults = useAppSelector((state) => state.workOrder.faults);
+  const allInspections = useAppSelector((state) => state.workOrder.inspections);
+  const allSwitches = useAppSelector((state) => state.workOrder.switches);
+  const allYards = useAppSelector((state) => state.workOrder.yards);
+  const allRestrictions = useAppSelector((state) => state.workOrder.restrictions);
 
   const [toast, setToast] = useState('');
   const [selectedFaults, setSelectedFaults] = useState<string[]>([]);
@@ -144,6 +152,35 @@ export default function WorkOrderPlan() {
     };
   }, [allOrderRows, dialog]);
 
+  /** 当前编辑的单是否参与封锁 / 慢行校验：新建与待编排单校验，已下达及以后不再回头校验 */
+  const editingOrder = dialog.editingId
+    ? allOrderRows.find((item) => item.id === dialog.editingId)
+    : undefined;
+  const restrictionCheckable = !dialog.editingId || editingOrder?.state === 'planned';
+
+  /** 当前表单命中的限速 / 封锁条件（顺着关联病害 → 巡检 → 道岔 → 站场读取） */
+  const draftRestrictions = useMemo(
+    () =>
+      summarizeOrderRestrictions(
+        {
+          windowStart: dialog.form.windowStart,
+          windowEnd: dialog.form.windowEnd,
+          faultIds: dialog.form.faultIds,
+        },
+        {
+          faults: allFaults,
+          inspections: allInspections,
+          switches: allSwitches,
+          yards: allYards,
+          restrictions: allRestrictions,
+        },
+      ),
+    [dialog.form.windowStart, dialog.form.windowEnd, dialog.form.faultIds, allFaults, allInspections, allSwitches, allYards, allRestrictions],
+  );
+
+  /** 命中封锁且需要校验时挡住保存 */
+  const saveBlocked = restrictionCheckable && draftRestrictions.blockers.length > 0;
+
   const openCreate = (): void => {
     const next = defaultForm();
     next.faultIds = selectedFaults;
@@ -179,9 +216,18 @@ export default function WorkOrderPlan() {
       setToast('天窗止必须晚于天窗起');
       return;
     }
+    if (saveBlocked) {
+      setToast(`天窗与封锁条件相交，无法保存：${draftRestrictions.blockers.map(describeRestrictionHit).join('；')}`);
+      return;
+    }
     if (dialog.editingId) {
-      await dispatch(updateWorkOrder({ id: dialog.editingId, draft: dialog.form }));
-      setToast('作业单已更新');
+      try {
+        await dispatch(updateWorkOrder({ id: dialog.editingId, draft: dialog.form })).unwrap();
+        setToast('作业单已更新');
+      } catch (error) {
+        setToast(`保存失败：${error instanceof Error ? error.message : String(error ?? '未知错误')}`);
+        return;
+      }
     } else {
       try {
         const result = await dispatch(createWorkOrder(dialog.form)).unwrap();
@@ -191,7 +237,7 @@ export default function WorkOrderPlan() {
             : '作业单已创建',
         );
       } catch (error) {
-        setToast(`建单失败：${error instanceof Error ? error.message : '未知错误'}`);
+        setToast(`建单失败：${error instanceof Error ? error.message : String(error ?? '未知错误')}`);
         return;
       }
       dispatch(clearFaultSelection());
@@ -207,7 +253,8 @@ export default function WorkOrderPlan() {
             天窗作业单编排
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            勾选待修病害成单，分配天窗时间窗、负责人、作业人员与机具，并做时间窗 / 人员 / 机具三重冲突校验。
+            勾选待修病害成单，分配天窗时间窗、负责人、作业人员与机具，并做时间窗 / 人员 / 机具三重冲突校验；
+            同时顺着关联病害读取站场级、道岔级慢行 / 封锁条件，整单按最低限速备料，命中封锁（限速 0）即挡住保存。
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
@@ -368,6 +415,21 @@ export default function WorkOrderPlan() {
                         ) : null}
                         {order.memberConflict ? <Chip size="small" color="warning" label="人员占用冲突" /> : null}
                         {order.machineConflict ? <Chip size="small" color="warning" label="机具占用冲突" /> : null}
+                        {order.restrictionBlockers.length > 0 ? (
+                          <Tooltip title={order.restrictionBlockers.map(describeRestrictionHit).join('\n')}>
+                            <Chip size="small" color="error" icon={<BlockIcon />} label="命中封锁，保存被拦截" />
+                          </Tooltip>
+                        ) : null}
+                        {order.restrictionBlockers.length === 0 && order.lowestLimitKmh !== null ? (
+                          <Tooltip title={order.restrictionHits.map(describeRestrictionHit).join('\n')}>
+                            <Chip
+                              size="small"
+                              color="warning"
+                              icon={<SpeedIcon />}
+                              label={`整单限速 ${order.lowestLimitKmh} km/h`}
+                            />
+                          </Tooltip>
+                        ) : null}
                       </Stack>
                       <Stack direction="row" spacing={0.5}>
                         <Button size="small" startIcon={<EditIcon />} onClick={() => openEdit(order)}>
@@ -590,6 +652,33 @@ export default function WorkOrderPlan() {
             </Grid>
 
             <Grid item xs={12}>
+              {!restrictionCheckable ? (
+                <Alert severity="info" sx={{ mb: 1 }}>
+                  该单已下达或已完成，不再回头校验封锁 / 慢行条件；以下命中信息仅供参考。
+                </Alert>
+              ) : null}
+              {draftRestrictions.hits.length === 0 ? (
+                <Alert severity="success">限速预检：当前时间窗未命中任何慢行 / 封锁条件。</Alert>
+              ) : (
+                <Alert
+                  severity={saveBlocked ? 'error' : 'warning'}
+                  icon={saveBlocked ? <BlockIcon /> : <SpeedIcon />}
+                >
+                  {saveBlocked ? '天窗与封锁条件相交，已挡住保存。' : null}
+                  命中限速条件 {draftRestrictions.hits.length} 条（顺着关联病害 → 道岔 → 站场读取）：
+                  {draftRestrictions.hits.map((hit) => (
+                    <div key={hit.restriction.id}>· {describeRestrictionHit(hit)}</div>
+                  ))}
+                  {draftRestrictions.lowestLimitKmh !== null && draftRestrictions.blockers.length === 0 ? (
+                    <div>
+                      多处限速不一致时整单按最严一条备料：整单备料限速取最低 {draftRestrictions.lowestLimitKmh} km/h。
+                    </div>
+                  ) : null}
+                </Alert>
+              )}
+            </Grid>
+
+            <Grid item xs={12}>
               <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
                 <Button
                   size="small"
@@ -627,9 +716,13 @@ export default function WorkOrderPlan() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setDialog((prev) => ({ ...prev, open: false }))}>取消</Button>
-          <Button variant="contained" onClick={() => void submit()}>
-            保存
-          </Button>
+          <Tooltip title={saveBlocked ? '天窗与封锁条件相交，无法保存' : ''}>
+            <span>
+              <Button variant="contained" disabled={saveBlocked} onClick={() => void submit()}>
+                保存
+              </Button>
+            </span>
+          </Tooltip>
         </DialogActions>
       </Dialog>
 
